@@ -1,3 +1,0 @@
-# Example commands (replace with your actual repository URL)
-git remote add origin https://github.com/mpdimitr/stock-investor-analysis.git
-git push -u origin main
