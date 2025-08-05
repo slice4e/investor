@@ -3,6 +3,11 @@ pandas>=2.0.0
 numpy>=1.24.0
 yfinance>=0.2.0
 requests>=2.31.0
+lxml>=4.9.0
+
+# Excel and data export
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
 
 # Financial data and analysis
 alpha-vantage>=2.3.0

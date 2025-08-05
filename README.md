@@ -1,227 +1,194 @@
-# Stock Investor
+# Stock Market Data Downloader 📈
 
-A comprehensive Python application for stock market analysis, portfolio management, and investment strategy development.
+A professional-grade Python application for downloading comprehensive historical stock market data. Built for investors, analysts, and researchers who need reliable, clean financial data for analysis and backtesting.
 
-## Features
+## 🚀 Features
 
-### 📊 Data Fetching
-- Real-time stock price data via Yahoo Finance
-- Historical price data with customizable periods
-- Stock information and company details
-- Support for multiple data sources (extensible)
+### 📊 Comprehensive Data Coverage
+- **S&P 500**: Download all ~500 companies with maximum historical data available
+- **NASDAQ**: Download NASDAQ-100 companies 
+- **Custom Tickers**: Download any stock ticker symbols
+- **Maximum History**: Goes back as far as data is available (some stocks to 1960s+)
 
-### 💼 Portfolio Management
-- Buy and sell stock transactions
-- Portfolio performance tracking
-- Holdings summary and analysis
-- Transaction history
-- Real-time portfolio valuation
+### 📁 Multiple Export Formats  
+- **CSV Files**: Individual files per stock or combined datasets
+- **Excel Files**: Multi-sheet workbooks with summary information
+- **Data Validation**: Automatic error handling and retry logic
+- **Progress Tracking**: Real-time download progress and success rates
 
-### 📈 Technical Analysis
-- Moving averages (20, 50, 200 day)
-- Relative Strength Index (RSI)
-- Bollinger Bands
-- MACD (Moving Average Convergence Divergence)
-- Volatility calculations
-- Comprehensive stock analysis charts
+### ⚡ High Performance
+- **Parallel Downloads**: Multi-threaded downloading for speed
+- **Robust Error Handling**: Continues downloading even if some stocks fail
+- **Memory Efficient**: Processes large datasets without memory issues
+- **Corporate Network Support**: Works with proxy settings
 
-### 🖥️ Command Line Interface
-- Interactive portfolio management
-- Stock analysis commands
-- Multi-stock comparison
-- Visualization tools
-
-## Installation
+## 🛠️ Installation
 
 ### Prerequisites
-- Python 3.9 or higher
-- pip (Python package installer)
+- Python 3.8 or higher
+- Internet connection
 
 ### Setup
-
-1. **Clone or download the project**
-   ```bash
-   git clone <repository-url>
-   cd stock-investor
-   ```
-
-2. **Create a virtual environment** (recommended)
-   ```bash
-   python -m venv venv
-   
-   # On Windows
-   venv\Scripts\activate
-   
-   # On macOS/Linux
-   source venv/bin/activate
-   ```
-
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configure environment (optional)**
-   ```bash
-   copy .env.example .env
-   # Edit .env file with your API keys if needed
-   ```
-
-## Usage
-
-### Command Line Interface
-
-The application provides several CLI commands:
-
-#### Analyze a Stock
 ```bash
-python -m src.main analyze AAPL --period 1y
+# Clone the repository
+git clone https://github.com/slice4e/investor.git
+cd investor
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the interactive downloader
+python download_manager.py
 ```
 
-#### Compare Multiple Stocks
+## 🎯 Quick Start
+
+### Interactive Mode (Recommended)
 ```bash
-python -m src.main compare AAPL GOOGL MSFT --period 6mo
+python download_manager.py
 ```
+This launches an interactive menu with options for:
+1. Download S&P 500 stocks
+2. Download NASDAQ stocks  
+3. Download custom tickers
+4. Download complete market data
+5. View downloaded files
+6. Clean up data directory
 
-#### Generate Stock Analysis Charts
-```bash
-python -m src.main plot AAPL --period 1y
-```
-
-#### Interactive Portfolio Management
-```bash
-python -m src.main portfolio
-```
-
-### Python API Usage
-
-#### Data Fetching
+### Programmatic Usage
 ```python
-from src.data_fetcher import StockDataFetcher
+from data_downloader import StockDataDownloader
 
-fetcher = StockDataFetcher()
-data = fetcher.get_stock_data("AAPL", period="1y")
-info = fetcher.get_stock_info("AAPL")
-price = fetcher.get_real_time_price("AAPL")
+# Initialize downloader
+downloader = StockDataDownloader(output_dir="my_data")
+
+# Download specific stocks
+tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
+data = downloader.download_custom_tickers(tickers)
+
+# Save to Excel
+downloader.save_to_excel(data, "tech_stocks.xlsx")
+
+# Or save individual CSV files
+downloader.save_to_csv(data, "individual_stocks")
 ```
 
-#### Portfolio Management
+## 📋 Data Fields
+
+Each downloaded stock includes:
+- **Date**: Trading date
+- **Open**: Opening price
+- **High**: Daily high price  
+- **Low**: Daily low price
+- **Close**: Closing price (adjusted)
+- **Volume**: Trading volume
+- **Ticker**: Stock symbol
+- **Download_Date**: When data was downloaded
+
+## 📊 Example Output
+
+### Summary Statistics
+```
+📈 AAPL Analysis:
+  Latest Price: $203.89
+  52W High: $258.40
+  52W Low: $172.19
+  Records: 11,252 (1980-12-12 to 2025-08-05)
+```
+
+### File Structure
+```
+stock_market_data/
+├── sp500/
+│   ├── AAPL_historical_data.csv
+│   ├── MSFT_historical_data.csv
+│   └── ...
+├── nasdaq/
+│   ├── GOOGL_historical_data.csv
+│   └── ...
+├── custom/
+│   └── custom_tickers_data.csv
+├── sp500_data.xlsx
+├── nasdaq_data.xlsx
+└── download_report.csv
+```
+
+## 🔧 Configuration
+
+### Environment Setup
+```bash
+# For corporate networks, set proxy (optional)
+export http_proxy=http://proxy:port
+export https_proxy=http://proxy:port
+```
+
+### Custom Output Directory
 ```python
-from src.portfolio import Portfolio
-
-portfolio = Portfolio(initial_cash=10000)
-portfolio.buy_stock("AAPL", 10)  # Buy 10 shares
-portfolio.sell_stock("AAPL", 5)  # Sell 5 shares
-
-performance = portfolio.get_portfolio_performance()
-holdings = portfolio.get_holdings_summary()
+# Use custom directory
+downloader = StockDataDownloader(output_dir="custom_data_folder")
 ```
 
-#### Stock Analysis
-```python
-from src.analyzer import StockAnalyzer
+## 📈 Use Cases
 
-analyzer = StockAnalyzer()
-analysis = analyzer.analyze_stock("AAPL", period="1y")
-analyzer.plot_stock_analysis("AAPL")
+### Investment Research
+- Download complete S&P 500 for portfolio analysis
+- Get historical data for fundamental analysis
+- Research sector performance over time
 
-# Compare multiple stocks
-comparison = analyzer.compare_stocks(["AAPL", "GOOGL", "MSFT"])
-```
+### Backtesting Strategies
+- Clean, validated data for strategy testing
+- Maximum historical coverage for robust analysis
+- Multiple tickers for diversification studies
 
-## Project Structure
+### Academic Research
+- Large datasets for financial modeling
+- Long-term historical data for academic papers
+- Clean, standardized data format
 
-```
-stock-investor/
-├── src/                    # Source code
-│   ├── __init__.py
-│   ├── data_fetcher.py     # Stock data retrieval
-│   ├── portfolio.py        # Portfolio management
-│   ├── analyzer.py         # Technical analysis
-│   └── main.py            # CLI application
-├── tests/                  # Unit tests
-│   ├── test_data_fetcher.py
-│   └── test_portfolio.py
-├── data/                   # Data storage
-├── docs/                   # Documentation
-├── requirements.txt        # Python dependencies
-├── pyproject.toml         # Project configuration
-├── .env.example           # Environment variables template
-├── .gitignore            # Git ignore rules
-└── README.md             # This file
-```
+### Data Science Projects
+- Feature engineering for ML models
+- Time series analysis and forecasting
+- Market pattern recognition
 
-## Development
+## 🛡️ Error Handling
 
-### Running Tests
-```bash
-pytest tests/
-```
+The downloader includes robust error handling:
+- **Network Issues**: Automatic retries for failed downloads
+- **Invalid Tickers**: Continues with valid tickers, reports failures
+- **Rate Limiting**: Respects API limits and includes delays
+- **Data Validation**: Checks for empty or corrupt data
 
-### Code Formatting
-```bash
-black src/ tests/
-```
+## 📊 Performance
 
-### Type Checking
-```bash
-mypy src/
-```
+### Benchmark Results
+- **Single Stock**: ~1-2 seconds
+- **10 Stocks**: ~5-10 seconds  
+- **S&P 500 (~500 stocks)**: ~15-30 minutes
+- **Complete Market**: ~45-60 minutes
 
-### Linting
-```bash
-flake8 src/ tests/
-```
+Performance depends on:
+- Internet connection speed
+- Number of concurrent downloads (default: 10)
+- Data history length per stock
 
-## Configuration
-
-### Environment Variables
-Create a `.env` file from `.env.example` and configure:
-
-- `ALPHA_VANTAGE_API_KEY`: For Alpha Vantage data (optional)
-- `LOG_LEVEL`: Logging level (INFO, DEBUG, WARNING, ERROR)
-- `DATA_CACHE_ENABLED`: Enable/disable data caching
-- `DATA_CACHE_DURATION_HOURS`: Cache duration in hours
-
-### Data Sources
-The application primarily uses Yahoo Finance (free) but can be extended with:
-- Alpha Vantage (requires API key)
-- Polygon.io (requires API key)
-- IEX Cloud (requires API key)
-
-## Features in Development
-
-- [ ] Advanced portfolio optimization
-- [ ] Risk analysis tools
-- [ ] Backtesting framework
-- [ ] Web dashboard interface
-- [ ] Real-time alerts and notifications
-- [ ] Options and derivatives support
-- [ ] Machine learning price predictions
-
-## Contributing
+## 🤝 Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/new-feature`)
-3. Make your changes
-4. Add tests for new functionality
-5. Run the test suite (`pytest`)
-6. Commit your changes (`git commit -am 'Add new feature'`)
-7. Push to the branch (`git push origin feature/new-feature`)
-8. Create a Pull Request
+2. Create a feature branch
+3. Add tests for new functionality
+4. Submit a pull request
 
-## License
+## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Disclaimer
+## ⚠️ Disclaimer
 
-This software is for educational and research purposes only. It should not be used as the sole basis for investment decisions. Always consult with a qualified financial advisor before making investment decisions. The authors are not responsible for any financial losses incurred through the use of this software.
+This tool is for educational and research purposes only. Not financial advice. 
+Always verify data accuracy for production use.
 
-## Support
+## 🔗 Links
 
-For questions, issues, or feature requests, please open an issue on the GitHub repository or contact the development team.
-
----
-
-**Happy Investing! 📈**
+- **Repository**: https://github.com/slice4e/investor
+- **Issues**: https://github.com/slice4e/investor/issues
+- **Data Source**: Yahoo Finance (via yfinance library)
