@@ -148,3 +148,8 @@ stock_market_data/
 test_data/
 *.csv
 *.xlsx
+*.json
+# Exclude any large data files
+*_all_data.csv
+*_combined.csv
+download_report.csv
