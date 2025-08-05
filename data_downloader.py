@@ -20,13 +20,14 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import time
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple
 import logging
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,9 +53,11 @@ class StockDataDownloader:
         (self.output_dir / "nasdaq").mkdir(exist_ok=True)
         (self.output_dir / "custom").mkdir(exist_ok=True)
         (self.output_dir / "combined").mkdir(exist_ok=True)
+        (self.output_dir / "metadata").mkdir(exist_ok=True)
         
         self.failed_downloads = []
         self.successful_downloads = []
+        self.metadata_file = self.output_dir / "metadata" / "download_metadata.json"
         
     def get_sp500_tickers(self) -> List[str]:
         """
@@ -168,6 +171,248 @@ class StockDataDownloader:
         except Exception as e:
             logger.error(f"Error downloading {ticker}: {e}")
             return None
+    
+    def save_metadata(self, ticker: str, subfolder: str, last_date: str, record_count: int):
+        """
+        Save metadata about downloaded stock data.
+        
+        Args:
+            ticker: Stock ticker symbol
+            subfolder: Subfolder where data is stored
+            last_date: Last date of data in YYYY-MM-DD format
+            record_count: Number of records in the dataset
+        """
+        try:
+            # Load existing metadata
+            metadata = {}
+            if self.metadata_file.exists():
+                with open(self.metadata_file, 'r') as f:
+                    metadata = json.load(f)
+            
+            # Update metadata for this ticker
+            metadata[ticker] = {
+                'subfolder': subfolder,
+                'last_date': last_date,
+                'record_count': record_count,
+                'last_updated': datetime.now().isoformat(),
+                'file_path': str(self.output_dir / subfolder / f"{ticker}_historical_data.csv")
+            }
+            
+            # Save updated metadata
+            with open(self.metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+                
+        except Exception as e:
+            logger.error(f"Error saving metadata for {ticker}: {e}")
+    
+    def load_metadata(self) -> Dict:
+        """Load metadata about existing stock data."""
+        try:
+            if self.metadata_file.exists():
+                with open(self.metadata_file, 'r') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading metadata: {e}")
+            return {}
+    
+    def get_existing_data_info(self, ticker: str, subfolder: str) -> Optional[Tuple[pd.DataFrame, str]]:
+        """
+        Load existing data for a ticker and return last date.
+        
+        Args:
+            ticker: Stock ticker symbol
+            subfolder: Subfolder to check
+            
+        Returns:
+            Tuple of (existing_data, last_date_str) or None if no data exists
+        """
+        try:
+            file_path = self.output_dir / subfolder / f"{ticker}_historical_data.csv"
+            if file_path.exists():
+                existing_data = pd.read_csv(file_path)
+                if not existing_data.empty and 'Date' in existing_data.columns:
+                    existing_data['Date'] = pd.to_datetime(existing_data['Date'])
+                    last_date = existing_data['Date'].max()
+                    last_date_str = last_date.strftime('%Y-%m-%d')
+                    return existing_data, last_date_str
+            return None
+        except Exception as e:
+            logger.error(f"Error loading existing data for {ticker}: {e}")
+            return None
+    
+    def download_stock_data_incremental(self, ticker: str, subfolder: str = "custom", 
+                                      force_full: bool = False) -> Optional[pd.DataFrame]:
+        """
+        Download stock data with incremental update support.
+        
+        Args:
+            ticker: Stock ticker symbol
+            subfolder: Subfolder to save data
+            force_full: If True, download full history regardless of existing data
+            
+        Returns:
+            Complete DataFrame with historical data or None if failed
+        """
+        try:
+            logger.debug(f"Checking existing data for {ticker}")
+            
+            # Check if we have existing data
+            existing_info = None if force_full else self.get_existing_data_info(ticker, subfolder)
+            
+            if existing_info is None:
+                # No existing data, download full history
+                logger.info(f"📥 {ticker}: Downloading full history")
+                data = self.download_stock_data(ticker, period="max")
+                if data is not None:
+                    # Save to CSV
+                    file_path = self.output_dir / subfolder / f"{ticker}_historical_data.csv"
+                    data.to_csv(file_path, index=False)
+                    
+                    # Save metadata
+                    last_date = data['Date'].max().strftime('%Y-%m-%d')
+                    self.save_metadata(ticker, subfolder, last_date, len(data))
+                    
+                    logger.info(f"✅ {ticker}: Saved {len(data)} records (full history)")
+                return data
+            
+            else:
+                existing_data, last_date_str = existing_info
+                last_date = pd.to_datetime(last_date_str).date()
+                today = date.today()
+                
+                # Check if we need to update
+                if last_date >= today - timedelta(days=1):
+                    logger.info(f"📋 {ticker}: Data is current (last: {last_date_str})")
+                    return existing_data
+                
+                # Download new data since last update
+                start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
+                logger.info(f"🔄 {ticker}: Updating from {start_date}")
+                
+                stock = yf.Ticker(ticker)
+                new_data = stock.history(start=start_date, auto_adjust=True, prepost=True)
+                
+                if new_data.empty:
+                    logger.info(f"📋 {ticker}: No new data available")
+                    return existing_data
+                
+                # Process new data
+                new_data['Ticker'] = ticker
+                new_data['Download_Date'] = datetime.now()
+                new_data = new_data.reset_index()
+                
+                # Convert timezone-aware datetime to timezone-naive
+                if 'Date' in new_data.columns:
+                    new_data['Date'] = pd.to_datetime(new_data['Date']).dt.tz_localize(None)
+                
+                # Combine with existing data
+                combined_data = pd.concat([existing_data, new_data], ignore_index=True)
+                combined_data = combined_data.drop_duplicates(subset=['Date'], keep='last')
+                combined_data = combined_data.sort_values('Date').reset_index(drop=True)
+                
+                # Save updated data
+                file_path = self.output_dir / subfolder / f"{ticker}_historical_data.csv"
+                combined_data.to_csv(file_path, index=False)
+                
+                # Update metadata
+                last_date = combined_data['Date'].max().strftime('%Y-%m-%d')
+                self.save_metadata(ticker, subfolder, last_date, len(combined_data))
+                
+                logger.info(f"✅ {ticker}: Added {len(new_data)} new records (total: {len(combined_data)})")
+                return combined_data
+                
+        except Exception as e:
+            logger.error(f"Error in incremental download for {ticker}: {e}")
+            return None
+    
+    def update_existing_data(self, tickers: List[str] = None, subfolder: str = "custom",
+                           max_workers: int = 10) -> Dict[str, str]:
+        """
+        Update existing data for specified tickers or all existing tickers.
+        
+        Args:
+            tickers: List of tickers to update (None = update all existing)
+            subfolder: Subfolder to check/update
+            max_workers: Number of parallel workers
+            
+        Returns:
+            Dictionary with update results for each ticker
+        """
+        # Determine which tickers to update
+        if tickers is None:
+            # Get all existing tickers from metadata
+            metadata = self.load_metadata()
+            tickers = [ticker for ticker, info in metadata.items() 
+                      if info.get('subfolder') == subfolder]
+            
+            if not tickers:
+                # Fallback: scan directory for CSV files
+                folder_path = self.output_dir / subfolder
+                if folder_path.exists():
+                    csv_files = list(folder_path.glob("*_historical_data.csv"))
+                    tickers = [f.stem.replace('_historical_data', '') for f in csv_files]
+        
+        if not tickers:
+            logger.warning(f"No tickers found to update in {subfolder}")
+            return {}
+        
+        logger.info(f"🔄 Updating {len(tickers)} tickers in {subfolder}")
+        
+        update_results = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_ticker = {
+                executor.submit(self.download_stock_data_incremental, ticker, subfolder): ticker
+                for ticker in tickers
+            }
+            
+            for i, future in enumerate(as_completed(future_to_ticker), 1):
+                ticker = future_to_ticker[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        update_results[ticker] = "✅ Updated"
+                        self.successful_downloads.append(ticker)
+                    else:
+                        update_results[ticker] = "❌ Failed"
+                        self.failed_downloads.append(ticker)
+                except Exception as e:
+                    update_results[ticker] = f"❌ Error: {str(e)}"
+                    self.failed_downloads.append(ticker)
+                
+                if i % 10 == 0:
+                    logger.info(f"Progress: {i}/{len(tickers)} tickers processed")
+        
+        # Print summary
+        successful = sum(1 for status in update_results.values() if "✅" in status)
+        logger.info(f"Update complete: {successful}/{len(tickers)} successful")
+        
+        return update_results
+    
+    def get_data_summary(self) -> pd.DataFrame:
+        """
+        Get summary of all downloaded data.
+        
+        Returns:
+            DataFrame with summary information for each ticker
+        """
+        metadata = self.load_metadata()
+        if not metadata:
+            logger.warning("No metadata found")
+            return pd.DataFrame()
+        
+        summary_data = []
+        for ticker, info in metadata.items():
+            summary_data.append({
+                'Ticker': ticker,
+                'Subfolder': info.get('subfolder', 'unknown'),
+                'Last_Date': info.get('last_date', 'unknown'),
+                'Record_Count': info.get('record_count', 0),
+                'Last_Updated': info.get('last_updated', 'unknown'),
+                'Days_Since_Update': (datetime.now() - pd.to_datetime(info.get('last_updated', datetime.now()))).days
+            })
+        
+        return pd.DataFrame(summary_data)
     
     def download_multiple_stocks(self, tickers: List[str], period: str = "max", 
                                 max_workers: int = 10) -> Dict[str, pd.DataFrame]:
@@ -391,6 +636,117 @@ class StockDataDownloader:
         print("="*60)
         
         return report
+    
+    def download_custom_tickers_incremental(self, tickers: List[str], 
+                                          force_full: bool = False) -> Dict[str, pd.DataFrame]:
+        """
+        Download custom tickers with incremental update support.
+        
+        Args:
+            tickers: List of ticker symbols
+            force_full: If True, download full history for all tickers
+            
+        Returns:
+            Dictionary mapping ticker to DataFrame
+        """
+        logger.info(f"🚀 Starting incremental download for {len(tickers)} custom tickers...")
+        
+        results = {}
+        for ticker in tickers:
+            data = self.download_stock_data_incremental(ticker, "custom", force_full)
+            if data is not None:
+                results[ticker] = data
+        
+        # Create combined dataset
+        if results:
+            combined_df = self.create_combined_dataset(results)
+            if not combined_df.empty:
+                combined_df.to_csv(self.output_dir / "custom_tickers_data.csv", index=False)
+                logger.info(f"💾 Saved combined dataset: {len(combined_df)} total records")
+        
+        return results
+    
+    def download_sp500_data_incremental(self, force_full: bool = False) -> Dict[str, pd.DataFrame]:
+        """
+        Download S&P 500 data with incremental update support.
+        
+        Args:
+            force_full: If True, download full history for all stocks
+            
+        Returns:
+            Dictionary mapping ticker to DataFrame
+        """
+        logger.info("🚀 Starting incremental S&P 500 data download...")
+        tickers = self.get_sp500_tickers()
+        
+        results = {}
+        for ticker in tickers:
+            data = self.download_stock_data_incremental(ticker, "sp500", force_full)
+            if data is not None:
+                results[ticker] = data
+        
+        # Create combined dataset
+        if results:
+            combined_df = self.create_combined_dataset(results)
+            if not combined_df.empty:
+                combined_df.to_csv(self.output_dir / "sp500_all_data.csv", index=False)
+                logger.info(f"💾 Saved S&P 500 combined dataset: {len(combined_df)} total records")
+        
+        return results
+    
+    def download_nasdaq_data_incremental(self, force_full: bool = False) -> Dict[str, pd.DataFrame]:
+        """
+        Download NASDAQ data with incremental update support.
+        
+        Args:
+            force_full: If True, download full history for all stocks
+            
+        Returns:
+            Dictionary mapping ticker to DataFrame
+        """
+        logger.info("🚀 Starting incremental NASDAQ data download...")
+        tickers = self.get_nasdaq_tickers()
+        
+        results = {}
+        for ticker in tickers:
+            data = self.download_stock_data_incremental(ticker, "nasdaq", force_full)
+            if data is not None:
+                results[ticker] = data
+        
+        # Create combined dataset
+        if results:
+            combined_df = self.create_combined_dataset(results)
+            if not combined_df.empty:
+                combined_df.to_csv(self.output_dir / "nasdaq_all_data.csv", index=False)
+                logger.info(f"💾 Saved NASDAQ combined dataset: {len(combined_df)} total records")
+        
+        return results
+    
+    def update_all_data(self) -> Dict[str, Dict[str, str]]:
+        """
+        Update all existing data across all subfolders.
+        
+        Returns:
+            Dictionary with update results for each subfolder
+        """
+        logger.info("🔄 Starting comprehensive data update...")
+        
+        results = {}
+        subfolders = ["sp500", "nasdaq", "custom"]
+        
+        for subfolder in subfolders:
+            logger.info(f"📁 Updating {subfolder} data...")
+            update_result = self.update_existing_data(subfolder=subfolder)
+            results[subfolder] = update_result
+        
+        # Generate update summary
+        total_updated = sum(len(results[sf]) for sf in subfolders)
+        total_successful = sum(sum(1 for status in results[sf].values() if "✅" in status) 
+                             for sf in subfolders)
+        
+        logger.info(f"🎯 Update complete: {total_successful}/{total_updated} tickers updated successfully")
+        
+        return results
 
 
 def main():
