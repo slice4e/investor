@@ -141,3 +141,10 @@ data/*.xlsx
 # OS
 .DS_Store
 Thumbs.db
+
+# Data directories (local only - can be re-downloaded)
+data/
+stock_market_data/
+test_data/
+*.csv
+*.xlsx

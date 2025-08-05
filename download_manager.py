@@ -284,7 +284,7 @@ def main():
     print("This tool downloads comprehensive historical stock data.")
     
     # Initialize downloader
-    output_dir = "stock_market_data"
+    output_dir = "data"
     downloader = StockDataDownloader(output_dir=output_dir)
     
     while True:
