@@ -128,12 +128,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Data files
-data/*.csv
-data/*.json
-data/*.xlsx
-*.db
-
 # IDE
 .vscode/settings.json
 .idea/
@@ -146,10 +140,7 @@ Thumbs.db
 data/
 stock_market_data/
 test_data/
-*.csv
-*.xlsx
-*.json
-# Exclude any large data files
+# Exclude any large data files that might be created elsewhere
 *_all_data.csv
 *_combined.csv
 download_report.csv

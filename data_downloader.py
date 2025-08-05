@@ -755,7 +755,7 @@ def main():
     print("=====================================")
     
     # Initialize downloader
-    downloader = StockDataDownloader(output_dir="stock_data")
+    downloader = StockDataDownloader(output_dir="data")
     
     print("\nSelect download option:")
     print("1. Download S&P 500 stocks")
