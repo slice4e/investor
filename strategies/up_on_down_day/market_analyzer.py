@@ -314,33 +314,43 @@ class MarketAnalyzer:
         if filename is None:
             filename = f"{report['index'].lower()}_down_days_{report['year']}"
         
-        # Save daily data
-        daily_file = self.downloader.output_dir / f"{filename}_daily_stats.csv"
-        report['daily_data'].to_csv(daily_file)
-        
-        # Save threshold analysis
-        threshold_summary = []
-        for threshold, analysis in report['threshold_analysis'].items():
-            threshold_summary.append({
-                'threshold_pct': threshold,
-                'down_days_count': analysis['down_days_count'],
-                'percentage_of_year': analysis['percentage_of_year'],
-                'avg_down_pct': analysis['avg_down_pct'],
-                'max_down_pct': analysis['max_down_pct']
-            })
-        
-        threshold_df = pd.DataFrame(threshold_summary)
-        threshold_file = self.downloader.output_dir / f"{filename}_threshold_analysis.csv"
-        threshold_df.to_csv(threshold_file, index=False)
-        
-        # Save monthly breakdown
-        monthly_file = self.downloader.output_dir / f"{filename}_monthly_breakdown.csv"
-        report['monthly_breakdown'].to_csv(monthly_file)
-        
-        logger.info(f"Down day report saved:")
-        logger.info(f"  Daily stats: {daily_file}")
-        logger.info(f"  Threshold analysis: {threshold_file}")
-        logger.info(f"  Monthly breakdown: {monthly_file}")
+        try:
+            # Ensure data directory exists
+            data_dir = self.downloader.output_dir
+            data_dir.mkdir(exist_ok=True)
+            
+            # Save daily data
+            daily_file = data_dir / f"{filename}_daily_stats.csv"
+            report['daily_data'].to_csv(daily_file)
+            
+            # Save threshold analysis
+            threshold_summary = []
+            for threshold, analysis in report['threshold_analysis'].items():
+                threshold_summary.append({
+                    'threshold_pct': threshold,
+                    'down_days_count': analysis['down_days_count'],
+                    'percentage_of_year': analysis['percentage_of_year'],
+                    'avg_down_pct': analysis['avg_down_pct'],
+                    'max_down_pct': analysis['max_down_pct']
+                })
+            
+            threshold_df = pd.DataFrame(threshold_summary)
+            threshold_file = data_dir / f"{filename}_threshold_analysis.csv"
+            threshold_df.to_csv(threshold_file, index=False)
+            
+            # Save monthly breakdown
+            monthly_file = data_dir / f"{filename}_monthly_breakdown.csv"
+            report['monthly_breakdown'].to_csv(monthly_file)
+            
+            logger.info(f"Down day report saved:")
+            logger.info(f"  Daily stats: {daily_file}")
+            logger.info(f"  Threshold analysis: {threshold_file}")
+            logger.info(f"  Monthly breakdown: {monthly_file}")
+            
+        except PermissionError as e:
+            raise PermissionError(f"Cannot save files - they may be open in another application: {e}")
+        except Exception as e:
+            raise Exception(f"Error saving report files: {e}")
     
     def identify_winners_on_down_days(self, winner_threshold: float = 2.0) -> pd.DataFrame:
         """
@@ -422,9 +432,13 @@ def run_down_day_analysis_example():
             print(f"  {threshold}%+: {analysis['down_days_count']} days "
                   f"({analysis['percentage_of_year']:.1f}% of year)")
         
-        # Save the report
-        analyzer.save_down_day_report(report)
-        print(f"\n💾 Report saved to data/ directory")
+        # Try to save the report
+        try:
+            analyzer.save_down_day_report(report)
+            print(f"\n💾 Report saved to data/ directory")
+        except Exception as save_error:
+            print(f"\n⚠️  Warning: Could not save report files: {save_error}")
+            print("Report generated successfully but files could not be saved.")
         
     except Exception as e:
         print(f"❌ Error generating report: {e}")
@@ -510,6 +524,6 @@ def run_winners_on_down_days_example():
 
 
 if __name__ == "__main__":
-    #run_down_day_analysis_example()
+    run_down_day_analysis_example()
     run_winners_on_down_days_example()
 
