@@ -341,6 +341,41 @@ class MarketAnalyzer:
         logger.info(f"  Daily stats: {daily_file}")
         logger.info(f"  Threshold analysis: {threshold_file}")
         logger.info(f"  Monthly breakdown: {monthly_file}")
+    
+    def identify_winners_on_down_days(self, winner_threshold: float = 2.0) -> pd.DataFrame:
+        """
+        Identify stocks that are winners on down days.
+
+        Args:
+            winner_threshold: Percentage threshold to classify a stock as a winner.
+
+        Returns:
+            DataFrame containing winners for each down day.
+        """
+        down_days = self.identify_down_days()
+        winners = []
+
+        for date in down_days['date']:
+            daily_data = self.index_data[self.index_data['date'] == date]
+            daily_winners = daily_data[daily_data['change_pct'] >= winner_threshold]
+            winners.append({
+                'date': date,
+                'winners': daily_winners[['ticker', 'change_pct']].to_dict(orient='records')
+            })
+
+        return pd.DataFrame(winners)
+
+    def generate_winners_report(self, winner_threshold: float = 2.0, output_file: str = "winners_report.csv"):
+        """
+        Generate a report of winners on down days.
+
+        Args:
+            winner_threshold: Percentage threshold to classify a stock as a winner.
+            output_file: File path to save the report.
+        """
+        winners = self.identify_winners_on_down_days(winner_threshold)
+        winners.to_csv(output_file, index=False)
+        logger.info(f"Winners report saved to {output_file}")
 
 
 def run_down_day_analysis_example():
@@ -358,11 +393,18 @@ def run_down_day_analysis_example():
     # Initialize analyzer
     analyzer = MarketAnalyzer()
     
-    # Generate report for NASDAQ 2023
+    # Ensure NASDAQ data for 2024 is available
+    try:
+        analyzer.ensure_index_data('nasdaq')
+    except Exception as e:
+        print(f"❌ Error ensuring data availability: {e}")
+        return
+    
+    # Generate report for NASDAQ 2024
     try:
         report = analyzer.generate_down_day_report(
             index_name='nasdaq',
-            year=2023,
+            year=2024,
             thresholds=[60, 70, 80, 90]
         )
         
@@ -389,5 +431,85 @@ def run_down_day_analysis_example():
         logger.error("Down day analysis failed", exc_info=True)
 
 
+def run_winners_on_down_days_example():
+    """Example of identifying winners on down days."""
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    print("📊 Winners on Down Days Analysis")
+    print("=" * 40)
+    
+    # Initialize analyzer
+    analyzer = MarketAnalyzer()
+    
+    # Generate report for NASDAQ 2024
+    try:
+        report = analyzer.generate_down_day_report(
+            index_name='nasdaq',
+            year=2024,
+            thresholds=[80]  # Down day threshold of 80%
+        )
+        
+        # Get down days with 80% threshold
+        down_days = report['threshold_analysis'][80]['down_days']
+        
+        print(f"\n🔻 Winners on Down Days (Threshold: 80%)")
+        print("-" * 50)
+        
+        # Get all NASDAQ data once
+        daily_data = analyzer.ensure_index_data('nasdaq')
+        
+        # Identify winners for each down day
+        for date, row in down_days.iterrows():
+            print(f"\n📅 Date: {date.strftime('%Y-%m-%d')}")
+            print(f"  Total Stocks: {row['total_stocks']}")
+            print(f"  Stocks Down: {row['stocks_down']} ({row['pct_down']:.1f}%)")
+            
+            winners = []
+            
+            # Look at ALL stocks for this date, not just down_tickers
+            for ticker, stock_data in daily_data.items():
+                if date in stock_data.index:
+                    try:
+                        open_price = stock_data.loc[date, 'Open']
+                        close_price = stock_data.loc[date, 'Close']
+                        
+                        if pd.notna(open_price) and pd.notna(close_price) and open_price > 0:
+                            daily_return = (close_price - open_price) / open_price
+                            # Using a winner threshold of 2.0% 
+                            if daily_return >= 0.02:
+                                winners.append({
+                                    'ticker': ticker, 
+                                    'change_pct': daily_return * 100
+                                })
+                    except Exception as e:
+                        logger.debug(f"Error processing {ticker} for {date}: {e}")
+                        continue
+            
+            # Sort winners by performance
+            winners.sort(key=lambda x: x['change_pct'], reverse=True)
+            
+            if not winners:
+                print("  No winners found.")
+            else:
+                print(f"  Winners ({len(winners)} stocks):")
+                # Show top 10 winners
+                for winner in winners[:10]:
+                    print(f"    {winner['ticker']}: +{winner['change_pct']:.2f}%")
+                
+                if len(winners) > 10:
+                    print(f"    ... and {len(winners) - 10} more winners")
+        
+    except Exception as e:
+        print(f"❌ Error identifying winners: {e}")
+        logger.error("Winners analysis failed", exc_info=True)
+
+
 if __name__ == "__main__":
-    run_down_day_analysis_example()
+    #run_down_day_analysis_example()
+    run_winners_on_down_days_example()
+
