@@ -16,6 +16,7 @@ may continue to outperform in the short term.
 """
 
 import sys
+import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -42,7 +43,8 @@ class UpOnDownDayStrategy(BaseStrategy):
                  down_day_threshold: float = 80.0,
                  winner_threshold: float = 2.0,
                  max_positions: int = 3,
-                 position_size_pct: float = 0.33):
+                 position_size_pct: float = 0.33,
+                 hold_time_days: int = 1):
         """
         Initialize the Up on Down Day strategy.
         
@@ -52,12 +54,14 @@ class UpOnDownDayStrategy(BaseStrategy):
             winner_threshold: Minimum percentage gain to qualify as "winner"
             max_positions: Maximum number of positions to hold (top N winners)
             position_size_pct: Percentage of available capital to use per position
+            hold_time_days: Number of days to hold positions before selling
         """
         super().__init__("Up on Down Day", initial_capital)
         self.down_day_threshold = down_day_threshold
         self.winner_threshold = winner_threshold
         self.max_positions = max_positions
         self.position_size_pct = position_size_pct
+        self.hold_time_days = hold_time_days
         
         # Initialize market analyzer
         self.market_analyzer = MarketAnalyzer()
@@ -72,6 +76,7 @@ class UpOnDownDayStrategy(BaseStrategy):
         logger.info(f"  Winner threshold: {winner_threshold}%")
         logger.info(f"  Max positions: {max_positions}")
         logger.info(f"  Position size: {position_size_pct*100}%")
+        logger.info(f"  Hold time: {hold_time_days} days")
     
     def generate_signals(self, data: pd.DataFrame, ticker: str) -> pd.DataFrame:
         """
@@ -179,9 +184,17 @@ class UpOnDownDayStrategy(BaseStrategy):
         # Get NASDAQ market data
         self.market_data = self.market_analyzer.ensure_index_data('nasdaq')
         
-        # Calculate daily market statistics
+        # Generate cache key based on year range
+        start_year = pd.to_datetime(start_date).year
+        end_year = pd.to_datetime(end_date).year
+        if start_year == end_year:
+            cache_key = f"nasdaq_down_days_{start_year}"
+        else:
+            cache_key = f"nasdaq_down_days_{start_year}_{end_year}"
+        
+        # Calculate daily market statistics with caching
         self.daily_stats = self.market_analyzer.calculate_daily_down_percentage(
-            self.market_data, start_date, end_date
+            self.market_data, start_date, end_date, cache_key=cache_key
         )
         
         logger.info(f"Prepared data for {len(self.daily_stats)} trading days")
@@ -323,12 +336,14 @@ class UpOnDownDayStrategy(BaseStrategy):
                 logger.info(f"BUY: {shares} shares of {ticker} at ${price:.2f} "
                            f"(+{winner['change_pct']:.2f}% on down day)")
                 
-                # Schedule this position for sale next trading day
+                # Schedule this position for sale after hold_time_days trading days
+                # For hold_time_days=1, sell on next trading day (original behavior)
                 self.positions_to_sell.append({
                     'ticker': ticker,
                     'shares': shares,
                     'buy_date': date,
-                    'buy_price': price
+                    'buy_price': price,
+                    'hold_time_days': self.hold_time_days
                 })
                 
                 return True
@@ -337,7 +352,7 @@ class UpOnDownDayStrategy(BaseStrategy):
     
     def _process_sells(self, current_date: pd.Timestamp):
         """
-        Process sell orders for positions bought on previous day.
+        Process sell orders for positions that have reached their hold time.
         
         Args:
             current_date: Current trading date
@@ -347,7 +362,28 @@ class UpOnDownDayStrategy(BaseStrategy):
         
         positions_sold = []
         
+        # Get list of trading dates for counting
+        trading_dates = sorted(self.daily_stats.index.tolist())
+        
         for position in self.positions_to_sell[:]:  # Copy to avoid modification during iteration
+            buy_date = position['buy_date']
+            hold_time_days = position['hold_time_days']
+            
+            # Count trading days since purchase
+            try:
+                buy_date_idx = trading_dates.index(buy_date)
+                current_date_idx = trading_dates.index(current_date)
+                trading_days_held = current_date_idx - buy_date_idx
+                
+                # For hold_time_days=1, sell on the next trading day (trading_days_held=1)
+                # For hold_time_days=2, sell 2 trading days later (trading_days_held=2)
+                if trading_days_held < hold_time_days:
+                    continue
+                    
+            except ValueError:
+                # Date not found in trading dates, skip
+                continue
+                
             ticker = position['ticker']
             shares = position['shares']
             buy_price = position['buy_price']
@@ -363,7 +399,7 @@ class UpOnDownDayStrategy(BaseStrategy):
                         if success:
                             trade_return = (sell_price - buy_price) / buy_price * 100
                             logger.info(f"SELL: {shares} shares of {ticker} at ${sell_price:.2f} "
-                                       f"(bought ${buy_price:.2f}, return: {trade_return:+.2f}%)")
+                                       f"(bought ${buy_price:.2f}, held {trading_days_held} trading days, return: {trade_return:+.2f}%)")
                             
                             positions_sold.append(position)
                 
@@ -410,6 +446,7 @@ class UpOnDownDayStrategy(BaseStrategy):
             'winner_threshold': self.winner_threshold,
             'max_positions': self.max_positions,
             'position_size_pct': self.position_size_pct,
+            'hold_time_days': self.hold_time_days,
             'pending_sells': len(self.positions_to_sell)
         }
         
@@ -430,8 +467,197 @@ class UpOnDownDayStrategy(BaseStrategy):
         return 0
 
 
+def main():
+    """Main function with command-line argument parsing."""
+    
+    parser = argparse.ArgumentParser(
+        description="Up on Down Day Strategy - Standalone Execution",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run strategy for 2024 with default parameters
+  python up_on_down_day_strategy.py --from-date 2024-01-01
+
+  # Custom parameters
+  python up_on_down_day_strategy.py --from-date 2024-01-01 --to-date 2024-06-30 \\
+    --down-day-threshold 75 --winner-threshold 1.5 --winner-hold-time 2
+
+  # Conservative strategy
+  python up_on_down_day_strategy.py --from-date 2024-01-01 \\
+    --down-day-threshold 85 --winner-threshold 3.0 --winner-hold-time 3 \\
+    --max-positions 2 --position-size 25
+        """
+    )
+    
+    # Required arguments
+    parser.add_argument(
+        '--from-date', 
+        required=True,
+        type=str,
+        help='Start date for backtesting (YYYY-MM-DD format)'
+    )
+    
+    # Optional arguments with defaults
+    parser.add_argument(
+        '--to-date',
+        type=str,
+        default=None,
+        help='End date for backtesting (YYYY-MM-DD format). Defaults to today.'
+    )
+    
+    parser.add_argument(
+        '--down-day-threshold',
+        type=float,
+        default=80.0,
+        help='Percentage of stocks down to qualify as "down day" (default: 80.0)'
+    )
+    
+    parser.add_argument(
+        '--winner-threshold',
+        type=float,
+        default=2.0,
+        help='Minimum percentage gain to qualify as "winner" stock (default: 2.0)'
+    )
+    
+    parser.add_argument(
+        '--winner-hold-time',
+        type=int,
+        default=1,
+        help='Number of days to hold winner positions (default: 1)'
+    )
+    
+    parser.add_argument(
+        '--max-positions',
+        type=int,
+        default=3,
+        help='Maximum number of positions to hold simultaneously (default: 3)'
+    )
+    
+    parser.add_argument(
+        '--position-size',
+        type=float,
+        default=30.0,
+        help='Percentage of available capital per position (default: 30.0)'
+    )
+    
+    parser.add_argument(
+        '--initial-capital',
+        type=float,
+        default=100000.0,
+        help='Starting capital for backtesting (default: 100,000)'
+    )
+    
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose logging'
+    )
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    log_level = logging.INFO if args.verbose else logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Validate dates
+    try:
+        from_date = datetime.strptime(args.from_date, '%Y-%m-%d').strftime('%Y-%m-%d')
+        if args.to_date:
+            to_date = datetime.strptime(args.to_date, '%Y-%m-%d').strftime('%Y-%m-%d')
+        else:
+            to_date = datetime.now().strftime('%Y-%m-%d')
+    except ValueError as e:
+        print(f"Error: Invalid date format. Use YYYY-MM-DD format.")
+        return 1
+    
+    # Validate parameters
+    if args.down_day_threshold <= 0 or args.down_day_threshold >= 100:
+        print(f"Error: Down day threshold must be between 0 and 100")
+        return 1
+    
+    if args.winner_threshold <= 0:
+        print(f"Error: Winner threshold must be positive")
+        return 1
+    
+    if args.winner_hold_time <= 0:
+        print(f"Error: Winner hold time must be positive")
+        return 1
+    
+    if args.max_positions <= 0:
+        print(f"Error: Max positions must be positive")
+        return 1
+    
+    if args.position_size <= 0 or args.position_size > 100:
+        print(f"Error: Position size must be between 0 and 100")
+        return 1
+    
+    if args.initial_capital <= 0:
+        print(f"Error: Initial capital must be positive")
+        return 1
+    
+    print("Up on Down Day Strategy - Standalone Execution")
+    print("=" * 60)
+    print(f"Period: {from_date} to {to_date}")
+    print(f"Initial Capital: ${args.initial_capital:,.2f}")
+    print(f"Down Day Threshold: {args.down_day_threshold}%")
+    print(f"Winner Threshold: {args.winner_threshold}%")
+    print(f"Hold Time: {args.winner_hold_time} days")
+    print(f"Max Positions: {args.max_positions}")
+    print(f"Position Size: {args.position_size}%")
+    print("=" * 60)
+    
+    # Initialize strategy with user parameters
+    strategy = UpOnDownDayStrategy(
+        initial_capital=args.initial_capital,
+        down_day_threshold=args.down_day_threshold,
+        winner_threshold=args.winner_threshold,
+        max_positions=args.max_positions,
+        position_size_pct=args.position_size / 100.0,  # Convert percentage to decimal
+        hold_time_days=args.winner_hold_time
+    )
+    
+    # Run backtest
+    try:
+        print("Running strategy backtest...")
+        summary = strategy.run_strategy(from_date, to_date)
+        
+        print(f"\nStrategy Results:")
+        print("-" * 40)
+        print(f"Initial Capital: ${summary['initial_capital']:,.2f}")
+        print(f"Final Value: ${summary['final_portfolio_value']:,.2f}")
+        print(f"Total Return: {summary['total_return']:+.2f}%")
+        print(f"Total Trades: {summary['total_trades']}")
+        print(f"Winning Trades: {summary['winning_trades']}")
+        print(f"Win Rate: {summary['win_rate']:.1f}%")
+        print(f"Average Trade: {summary['avg_trade_return']:+.2f}%")
+        print(f"Best Trade: {summary['best_trade']:+.2f}%")
+        print(f"Worst Trade: {summary['worst_trade']:+.2f}%")
+        
+        print(f"\nStrategy Parameters:")
+        print(f"Down Day Threshold: {summary['down_day_threshold']}%")
+        print(f"Winner Threshold: {summary['winner_threshold']}%")
+        print(f"Max Positions: {summary['max_positions']}")
+        print(f"Position Size: {summary['position_size_pct']*100}%")
+        print(f"Hold Time: {args.winner_hold_time} days")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"Error running strategy: {e}")
+        if args.verbose:
+            logger.error("Strategy execution failed", exc_info=True)
+        return 1
+
+
 def run_up_on_down_day_example():
-    """Example of running the Up on Down Day strategy."""
+    """Example of running the Up on Down Day strategy (deprecated - use main() instead)."""
+    
+    print("⚠️  This function is deprecated. Use the command-line interface instead:")
+    print("   python up_on_down_day_strategy.py --from-date 2024-01-01")
+    print("   python up_on_down_day_strategy.py --help")
     
     # Configure logging
     logging.basicConfig(
@@ -448,7 +674,8 @@ def run_up_on_down_day_example():
         down_day_threshold=80.0,
         winner_threshold=2.0,
         max_positions=3,
-        position_size_pct=0.30
+        position_size_pct=0.30,
+        hold_time_days=1
     )
     
     # Run backtest for 2024
@@ -472,6 +699,7 @@ def run_up_on_down_day_example():
         print(f"Winner Threshold: {summary['winner_threshold']}%")
         print(f"Max Positions: {summary['max_positions']}")
         print(f"Position Size: {summary['position_size_pct']*100}%")
+        print(f"Hold Time: 1 days")
         
     except Exception as e:
         print(f"❌ Error running strategy: {e}")
@@ -479,4 +707,5 @@ def run_up_on_down_day_example():
 
 
 if __name__ == "__main__":
-    run_up_on_down_day_example()
+    import sys
+    sys.exit(main())

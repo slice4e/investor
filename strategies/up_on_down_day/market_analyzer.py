@@ -12,8 +12,9 @@ Key Features:
 """
 
 import sys
+import argparse
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional, Union, Tuple
 import pandas as pd
 import numpy as np
@@ -40,6 +41,7 @@ class MarketAnalyzer:
     def ensure_index_data(self, index_name: str) -> Dict[str, pd.DataFrame]:
         """
         Ensure all stocks for an index are downloaded and available.
+        Uses bulk data files if available, falls back to individual files.
         
         Args:
             index_name: 'nasdaq' or 'sp500'
@@ -50,58 +52,91 @@ class MarketAnalyzer:
         logger.info(f"Ensuring data availability for {index_name.upper()} index")
         
         if index_name.lower() == 'nasdaq':
-            tickers = self.downloader.get_nasdaq_tickers()
+            tickers = self.downloader.get_nasdaq_100_tickers()  # Use NASDAQ-100 instead of all NASDAQ
             subfolder = 'nasdaq'
+            bulk_file = 'nasdaq_all_data.csv'
         elif index_name.lower() == 'sp500':
             tickers = self.downloader.get_sp500_tickers()
             subfolder = 'sp500'
+            bulk_file = 'sp500_all_data.csv'
         else:
             raise ValueError(f"Unsupported index: {index_name}")
         
         logger.info(f"Found {len(tickers)} tickers for {index_name.upper()}")
         
-        # Check which data we already have
         available_data = {}
-        missing_tickers = []
         
-        for ticker in tickers:
-            data_file = self.downloader.output_dir / subfolder / f"{ticker}_historical_data.csv"
-            if data_file.exists():
-                try:
-                    data = pd.read_csv(data_file)
-                    data['Date'] = pd.to_datetime(data['Date'])
-                    data.set_index('Date', inplace=True)
-                    available_data[ticker] = data
-                except Exception as e:
-                    logger.warning(f"Error loading {ticker}: {e}")
-                    missing_tickers.append(ticker)
-            else:
-                missing_tickers.append(ticker)
+        # First, try to load from bulk data file
+        bulk_file_path = self.downloader.output_dir / bulk_file
+        if bulk_file_path.exists():
+            try:
+                logger.info(f"Loading bulk data from {bulk_file}")
+                bulk_data = pd.read_csv(bulk_file_path)
+                bulk_data['Date'] = pd.to_datetime(bulk_data['Date'])
+                
+                # Split bulk data into individual ticker DataFrames
+                for ticker in tickers:
+                    try:
+                        ticker_data = bulk_data[bulk_data['Ticker'] == ticker].copy()
+                        if not ticker_data.empty:
+                            ticker_data = ticker_data.drop('Ticker', axis=1)
+                            ticker_data.set_index('Date', inplace=True)
+                            available_data[ticker] = ticker_data
+                    except Exception as e:
+                        logger.warning(f"Error processing {ticker} from bulk data: {e}")
+                        continue
+                        
+                logger.info(f"Loaded {len(available_data)} stocks from bulk data file")
+                
+                # If we got sufficient data, return it
+                coverage_ratio = len(available_data) / len(tickers)
+                if coverage_ratio >= 0.90:  # 90% threshold for completeness
+                    logger.info(f"Bulk data coverage is sufficient ({len(available_data)}/{len(tickers)} = {coverage_ratio:.1%} tickers)")
+                    return available_data
+                else:
+                    logger.info(f"Bulk data coverage is insufficient ({coverage_ratio:.1%}), will supplement with individual files")
+                    
+            except Exception as e:
+                logger.warning(f"Error loading bulk data from {bulk_file}: {e}")
+                # Don't clear available_data - keep what we loaded successfully
         
-        logger.info(f"Found existing data for {len(available_data)} stocks")
+        # Only supplement with individual files for truly missing tickers
+        missing_tickers = [ticker for ticker in tickers if ticker not in available_data]
         
-        # Download missing data
         if missing_tickers:
-            logger.info(f"Downloading missing data for {len(missing_tickers)} stocks")
+            logger.info(f"Looking for individual files for {len(missing_tickers)} missing tickers")
             
-            for i, ticker in enumerate(missing_tickers, 1):
-                try:
-                    logger.info(f"Downloading {ticker} ({i}/{len(missing_tickers)})")
-                    data = self.downloader.download_stock_data_incremental(ticker, subfolder)
-                    if data is not None:
+            for ticker in missing_tickers:
+                data_file = self.downloader.output_dir / subfolder / f"{ticker}_historical_data.csv"
+                if data_file.exists():
+                    try:
+                        data = pd.read_csv(data_file)
                         data['Date'] = pd.to_datetime(data['Date'])
                         data.set_index('Date', inplace=True)
                         available_data[ticker] = data
-                except Exception as e:
-                    logger.error(f"Failed to download {ticker}: {e}")
-                    continue
+                        missing_tickers.remove(ticker)
+                    except Exception as e:
+                        logger.warning(f"Error loading {ticker}: {e}")
         
-        logger.info(f"Total available data: {len(available_data)} stocks")
+        logger.info(f"Total loaded data: {len(available_data)} stocks")
+        
+        # Only download if we're missing a significant number of tickers
+        still_missing = [ticker for ticker in tickers if ticker not in available_data]
+        if still_missing:
+            missing_ratio = len(still_missing) / len(tickers)
+            if missing_ratio > 0.10:  # More than 10% missing
+                logger.warning(f"Still missing {len(still_missing)} tickers ({missing_ratio:.1%})")
+                logger.warning("Consider running the data downloader to update bulk data files")
+                logger.info("Proceeding with available data to avoid unnecessary downloads")
+            else:
+                logger.info(f"Only {len(still_missing)} tickers missing ({missing_ratio:.1%}) - proceeding with available data")
+        
         return available_data
     
     def calculate_daily_down_percentage(self, index_data: Dict[str, pd.DataFrame], 
                                       start_date: Union[str, date] = None,
-                                      end_date: Union[str, date] = None) -> pd.DataFrame:
+                                      end_date: Union[str, date] = None,
+                                      cache_key: str = None) -> pd.DataFrame:
         """
         Calculate the percentage of stocks that are down each day.
         
@@ -109,10 +144,18 @@ class MarketAnalyzer:
             index_data: Dictionary of {ticker: DataFrame} with stock data
             start_date: Start date for analysis (optional)
             end_date: End date for analysis (optional)
+            cache_key: Unique key for caching (e.g., "nasdaq_2024")
             
         Returns:
             DataFrame with daily down percentages
         """
+        # Try to load from cache first
+        if cache_key:
+            cached_data = self.load_daily_stats_cache(cache_key)
+            if cached_data is not None:
+                logger.info(f"Loaded cached daily statistics for {cache_key}")
+                return cached_data
+        
         logger.info("Calculating daily down percentages")
         
         # Convert dates
@@ -200,7 +243,110 @@ class MarketAnalyzer:
         logger.info(f"Max percentage down: {result_df['pct_down'].max():.1f}%")
         logger.info(f"Min percentage down: {result_df['pct_down'].min():.1f}%")
         
+        # Save to cache
+        if cache_key:
+            self.save_daily_stats_cache(result_df, cache_key)
+        
         return result_df
+    
+    def save_daily_stats_cache(self, daily_stats: pd.DataFrame, cache_key: str):
+        """
+        Save daily statistics to cache file.
+        
+        Args:
+            daily_stats: DataFrame with daily statistics
+            cache_key: Unique key for the cache file
+        """
+        try:
+            cache_dir = self.downloader.output_dir / "cache"
+            cache_dir.mkdir(exist_ok=True)
+            
+            cache_file = cache_dir / f"daily_stats_{cache_key}.pkl"
+            daily_stats.to_pickle(cache_file)
+            
+            logger.info(f"Daily statistics cached to {cache_file}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save daily statistics cache: {e}")
+    
+    def load_daily_stats_cache(self, cache_key: str) -> Optional[pd.DataFrame]:
+        """
+        Load daily statistics from cache file if it exists.
+        
+        Args:
+            cache_key: Unique key for the cache file
+            
+        Returns:
+            DataFrame with daily statistics or None if cache doesn't exist
+        """
+        try:
+            cache_dir = self.downloader.output_dir / "cache"
+            cache_file = cache_dir / f"daily_stats_{cache_key}.pkl"
+            
+            if cache_file.exists():
+                daily_stats = pd.read_pickle(cache_file)
+                
+                # Validate the cached data structure
+                required_columns = ['total_stocks', 'stocks_down', 'stocks_up', 'pct_down', 'pct_up']
+                if all(col in daily_stats.columns for col in required_columns):
+                    return daily_stats
+                else:
+                    logger.warning(f"Cache file {cache_file} has invalid structure, will recalculate")
+                    
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Failed to load daily statistics cache: {e}")
+            return None
+    
+    def clear_daily_stats_cache(self, cache_key: str = None):
+        """
+        Clear daily statistics cache files.
+        
+        Args:
+            cache_key: Specific cache key to clear, or None to clear all
+        """
+        try:
+            cache_dir = self.downloader.output_dir / "cache"
+            
+            if cache_key:
+                # Clear specific cache file
+                cache_file = cache_dir / f"daily_stats_{cache_key}.pkl"
+                if cache_file.exists():
+                    cache_file.unlink()
+                    logger.info(f"Cleared cache for {cache_key}")
+            else:
+                # Clear all daily stats cache files
+                if cache_dir.exists():
+                    for cache_file in cache_dir.glob("daily_stats_*.pkl"):
+                        cache_file.unlink()
+                    logger.info("Cleared all daily statistics cache files")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to clear cache: {e}")
+    
+    def list_cached_analyses(self) -> List[str]:
+        """
+        List available cached analyses.
+        
+        Returns:
+            List of cache keys for available analyses
+        """
+        try:
+            cache_dir = self.downloader.output_dir / "cache"
+            cache_keys = []
+            
+            if cache_dir.exists():
+                for cache_file in cache_dir.glob("daily_stats_*.pkl"):
+                    # Extract cache key from filename
+                    cache_key = cache_file.stem.replace("daily_stats_", "")
+                    cache_keys.append(cache_key)
+            
+            return sorted(cache_keys)
+            
+        except Exception as e:
+            logger.warning(f"Failed to list cached analyses: {e}")
+            return []
     
     def identify_down_days(self, daily_stats: pd.DataFrame, 
                           threshold: float = 70.0) -> pd.DataFrame:
@@ -223,7 +369,8 @@ class MarketAnalyzer:
         return down_days
     
     def generate_down_day_report(self, index_name: str, year: int, 
-                                thresholds: List[float] = [60, 70, 80, 90]) -> Dict:
+                                thresholds: List[float] = [60, 70, 80, 90],
+                                use_cache: bool = True) -> Dict:
         """
         Generate comprehensive down day report for a given year.
         
@@ -231,6 +378,7 @@ class MarketAnalyzer:
             index_name: 'nasdaq' or 'sp500'
             year: Year to analyze
             thresholds: List of down day thresholds to analyze
+            use_cache: Whether to use cached data if available
             
         Returns:
             Dictionary with comprehensive down day analysis
@@ -241,11 +389,16 @@ class MarketAnalyzer:
         start_date = f"{year}-01-01"
         end_date = f"{year}-12-31"
         
+        # Create cache key
+        cache_key = f"{index_name.lower()}_{year}" if use_cache else None
+        
         # Ensure data is available
         index_data = self.ensure_index_data(index_name)
         
-        # Calculate daily statistics
-        daily_stats = self.calculate_daily_down_percentage(index_data, start_date, end_date)
+        # Calculate daily statistics (with caching)
+        daily_stats = self.calculate_daily_down_percentage(
+            index_data, start_date, end_date, cache_key
+        )
         
         # Analyze different thresholds
         threshold_analysis = {}
@@ -388,8 +541,13 @@ class MarketAnalyzer:
         logger.info(f"Winners report saved to {output_file}")
 
 
-def run_down_day_analysis_example():
-    """Example of running down day analysis."""
+def run_down_day_analysis_example(use_cache: bool = True):
+    """
+    Example of running down day analysis.
+    
+    Args:
+        use_cache: Whether to use cached data if available
+    """
     
     # Configure logging
     logging.basicConfig(
@@ -415,7 +573,8 @@ def run_down_day_analysis_example():
         report = analyzer.generate_down_day_report(
             index_name='nasdaq',
             year=2024,
-            thresholds=[60, 70, 80, 90]
+            thresholds=[60, 70, 80, 90],
+            use_cache=use_cache
         )
         
         # Display results
@@ -445,8 +604,19 @@ def run_down_day_analysis_example():
         logger.error("Down day analysis failed", exc_info=True)
 
 
-def run_winners_on_down_days_example():
-    """Example of identifying winners on down days."""
+def run_winners_on_down_days_example(down_day_threshold: float = 80.0, 
+                                     winner_threshold: float = 2.0,
+                                     winner_hold_days: int = 1,
+                                     use_cache: bool = True):
+    """
+    Example of identifying winners on down days with configurable parameters.
+    
+    Args:
+        down_day_threshold: Percentage threshold for down days (default: 80.0)
+        winner_threshold: Percentage threshold for winners (default: 2.0)
+        winner_hold_days: Number of days to hold winners (default: 1)
+        use_cache: Whether to use cached data if available
+    """
     
     # Configure logging
     logging.basicConfig(
@@ -456,6 +626,9 @@ def run_winners_on_down_days_example():
     
     print("📊 Winners on Down Days Analysis")
     print("=" * 40)
+    print(f"Down Day Threshold: {down_day_threshold}%")
+    print(f"Winner Threshold: {winner_threshold}%")
+    print(f"Winner Hold Days: {winner_hold_days}")
     
     # Initialize analyzer
     analyzer = MarketAnalyzer()
@@ -465,17 +638,21 @@ def run_winners_on_down_days_example():
         report = analyzer.generate_down_day_report(
             index_name='nasdaq',
             year=2024,
-            thresholds=[80]  # Down day threshold of 80%
+            thresholds=[down_day_threshold],
+            use_cache=use_cache
         )
         
-        # Get down days with 80% threshold
-        down_days = report['threshold_analysis'][80]['down_days']
+        # Get down days with specified threshold
+        down_days = report['threshold_analysis'][down_day_threshold]['down_days']
         
-        print(f"\n🔻 Winners on Down Days (Threshold: 80%)")
+        print(f"\n🔻 Winners on Down Days (Threshold: {down_day_threshold}%)")
         print("-" * 50)
         
         # Get all NASDAQ data once
         daily_data = analyzer.ensure_index_data('nasdaq')
+        
+        total_winners = 0
+        total_down_days = len(down_days)
         
         # Identify winners for each down day
         for date, row in down_days.iterrows():
@@ -494,18 +671,24 @@ def run_winners_on_down_days_example():
                         
                         if pd.notna(open_price) and pd.notna(close_price) and open_price > 0:
                             daily_return = (close_price - open_price) / open_price
-                            # Using a winner threshold of 2.0% 
-                            if daily_return >= 0.02:
+                            if daily_return >= winner_threshold / 100:
+                                # Calculate return after holding for specified days
+                                hold_return = calculate_hold_return(
+                                    stock_data, date, winner_hold_days, open_price, close_price
+                                )
+                                
                                 winners.append({
                                     'ticker': ticker, 
-                                    'change_pct': daily_return * 100
+                                    'day_change_pct': daily_return * 100,
+                                    'hold_return_pct': hold_return
                                 })
                     except Exception as e:
                         logger.debug(f"Error processing {ticker} for {date}: {e}")
                         continue
             
-            # Sort winners by performance
-            winners.sort(key=lambda x: x['change_pct'], reverse=True)
+            # Sort winners by day performance
+            winners.sort(key=lambda x: x['day_change_pct'], reverse=True)
+            total_winners += len(winners)
             
             if not winners:
                 print("  No winners found.")
@@ -513,17 +696,187 @@ def run_winners_on_down_days_example():
                 print(f"  Winners ({len(winners)} stocks):")
                 # Show top 10 winners
                 for winner in winners[:10]:
-                    print(f"    {winner['ticker']}: +{winner['change_pct']:.2f}%")
+                    print(f"    {winner['ticker']}: +{winner['day_change_pct']:.2f}% "
+                          f"(Hold {winner_hold_days} day{'s' if winner_hold_days > 1 else ''}: "
+                          f"{winner['hold_return_pct']:+.2f}%)")
                 
                 if len(winners) > 10:
                     print(f"    ... and {len(winners) - 10} more winners")
+        
+        # Summary statistics
+        print(f"\n📈 Summary Statistics:")
+        print(f"  Total down days analyzed: {total_down_days}")
+        print(f"  Total winners found: {total_winners}")
+        print(f"  Average winners per down day: {total_winners / total_down_days:.1f}")
         
     except Exception as e:
         print(f"❌ Error identifying winners: {e}")
         logger.error("Winners analysis failed", exc_info=True)
 
 
+def calculate_hold_return(stock_data: pd.DataFrame, buy_date: pd.Timestamp, 
+                         hold_days: int, buy_open: float, buy_close: float) -> float:
+    """
+    Calculate the return after holding a stock for specified number of days.
+    
+    Args:
+        stock_data: Stock price data
+        buy_date: Date when stock was bought
+        hold_days: Number of days to hold
+        buy_open: Opening price on buy date
+        buy_close: Closing price on buy date (actual buy price)
+        
+    Returns:
+        Return percentage after holding for specified days
+    """
+    try:
+        # Find sell date (hold_days trading days after buy_date)
+        available_dates = stock_data.index[stock_data.index > buy_date].sort_values()
+        
+        if len(available_dates) < hold_days:
+            # Not enough data, return the best available
+            if len(available_dates) == 0:
+                return 0.0
+            sell_date = available_dates[-1]
+        else:
+            sell_date = available_dates[hold_days - 1]
+        
+        # Get sell price (opening price of sell date)
+        if sell_date in stock_data.index:
+            sell_price = stock_data.loc[sell_date, 'Open']
+            if pd.notna(sell_price) and sell_price > 0:
+                return ((sell_price - buy_close) / buy_close) * 100
+        
+        return 0.0
+        
+    except Exception as e:
+        logger.debug(f"Error calculating hold return: {e}")
+        return 0.0
+
+
+def main():
+    """Main function with command-line argument parsing."""
+    parser = argparse.ArgumentParser(
+        description='Market Down Day Analysis with configurable parameters',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    parser.add_argument(
+        '--down-day-threshold', 
+        type=float, 
+        default=80.0,
+        help='Percentage threshold for down days (e.g., 80.0 for 80%%)'
+    )
+    
+    parser.add_argument(
+        '--winner-threshold', 
+        type=float, 
+        default=2.0,
+        help='Percentage threshold for winners (e.g., 2.0 for 2%%)'
+    )
+    
+    parser.add_argument(
+        '--winner-hold-days', 
+        type=int, 
+        default=1,
+        help='Number of days to hold winner stocks before selling'
+    )
+    
+    parser.add_argument(
+        '--analysis-type',
+        choices=['down-days', 'winners', 'both'],
+        default='both',
+        help='Type of analysis to run'
+    )
+    
+    parser.add_argument(
+        '--year',
+        type=int,
+        default=2024,
+        help='Year to analyze'
+    )
+    
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Disable caching and force recalculation of daily statistics'
+    )
+    
+    parser.add_argument(
+        '--clear-cache',
+        type=str,
+        metavar='CACHE_KEY',
+        help='Clear cached data for specific analysis (e.g., nasdaq_2024) or "all" for all cache'
+    )
+    
+    parser.add_argument(
+        '--list-cache',
+        action='store_true',
+        help='List available cached analyses and exit'
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle cache management commands
+    if args.list_cache:
+        analyzer = MarketAnalyzer()
+        cached_analyses = analyzer.list_cached_analyses()
+        if cached_analyses:
+            print("📁 Available cached analyses:")
+            for cache_key in cached_analyses:
+                print(f"  - {cache_key}")
+        else:
+            print("📁 No cached analyses found")
+        return
+    
+    if args.clear_cache:
+        analyzer = MarketAnalyzer()
+        if args.clear_cache.lower() == 'all':
+            analyzer.clear_daily_stats_cache()
+            print("🗑️  Cleared all cached analyses")
+        else:
+            analyzer.clear_daily_stats_cache(args.clear_cache)
+            print(f"🗑️  Cleared cache for {args.clear_cache}")
+        return
+    
+    # Validate arguments
+    if args.down_day_threshold < 0 or args.down_day_threshold > 100:
+        print("❌ Error: Down day threshold must be between 0 and 100")
+        return
+    
+    if args.winner_threshold < 0:
+        print("❌ Error: Winner threshold must be positive")
+        return
+    
+    if args.winner_hold_days < 1:
+        print("❌ Error: Winner hold days must be at least 1")
+        return
+    
+    use_cache = not args.no_cache
+    
+    print(f"🔧 Configuration:")
+    print(f"  Analysis Year: {args.year}")
+    print(f"  Down Day Threshold: {args.down_day_threshold}%")
+    print(f"  Winner Threshold: {args.winner_threshold}%")
+    print(f"  Winner Hold Days: {args.winner_hold_days}")
+    print(f"  Analysis Type: {args.analysis_type}")
+    print(f"  Use Cache: {'Yes' if use_cache else 'No'}")
+    print()
+    
+    # Run selected analysis
+    if args.analysis_type in ['down-days', 'both']:
+        run_down_day_analysis_example(use_cache=use_cache)
+        print()
+    
+    if args.analysis_type in ['winners', 'both']:
+        run_winners_on_down_days_example(
+            down_day_threshold=args.down_day_threshold,
+            winner_threshold=args.winner_threshold,
+            winner_hold_days=args.winner_hold_days,
+            use_cache=use_cache
+        )
+
+
 if __name__ == "__main__":
-    run_down_day_analysis_example()
-    run_winners_on_down_days_example()
+    main()
 

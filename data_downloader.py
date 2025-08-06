@@ -20,6 +20,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
+import urllib3
 from datetime import datetime, timedelta, date
 import time
 import os
@@ -28,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Union, Tuple
 import logging
 import json
+import ssl
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -81,12 +83,11 @@ class StockDataDownloader:
             
         except Exception as e:
             logger.error(f"Error fetching S&P 500 tickers: {e}")
-            # Fallback to a known list of major S&P 500 stocks
-            return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ']
+            raise e
     
     def get_nasdaq_tickers(self) -> List[str]:
         """
-        Get NASDAQ company tickers.
+        Get NASDAQ company tickers (all NASDAQ-listed stocks).
         
         Returns:
             List of NASDAQ ticker symbols
@@ -110,26 +111,82 @@ class StockDataDownloader:
             
             if response.status_code == 200:
                 data = response.json()
-                if 'data' in data and 'rows' in data['data']:
-                    tickers = [row['symbol'] for row in data['data']['rows']]
-                    logger.info(f"Found {len(tickers)} NASDAQ tickers")
-                    return tickers
+                if 'data' in data and 'table' in data['data']:
+                    table_data = data['data']['table']
+                    if 'rows' in table_data:
+                        tickers = [row['symbol'] for row in table_data['rows']]
+                        logger.info(f"Found {len(tickers)} NASDAQ tickers")
+                        return tickers
+                    else:
+                        logger.error(f"'rows' key not found in table. Available keys: {list(table_data.keys()) if isinstance(table_data, dict) else 'N/A'}")
+                else:
+                    logger.error(f"Expected structure not found. Data keys: {list(data.get('data', {}).keys()) if 'data' in data else 'No data key'}")
             
-            # Fallback method using pandas
-            logger.info("Trying alternative method for NASDAQ tickers...")
-            url = "https://en.wikipedia.org/wiki/NASDAQ-100"
-            tables = pd.read_html(url)
-            nasdaq_table = tables[4]  # Usually the companies table
-            tickers = nasdaq_table['Ticker'].tolist()
-            tickers = [ticker.replace('.', '-') for ticker in tickers]
-            
-            logger.info(f"Found {len(tickers)} NASDAQ-100 tickers")
-            return tickers
+            raise Exception(f"Failed to fetch NASDAQ tickers. HTTP status: {response.status_code}")
             
         except Exception as e:
             logger.error(f"Error fetching NASDAQ tickers: {e}")
-            # Fallback to major NASDAQ stocks
-            return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NFLX', 'NVDA', 'ADBE', 'PYPL']
+            raise e
+    
+    def get_nasdaq_100_tickers(self) -> List[str]:
+        """
+        Get NASDAQ-100 index tickers (top 100 non-financial NASDAQ stocks).
+        
+        Returns:
+            List of NASDAQ-100 ticker symbols
+        """
+        try:
+            logger.info("Fetching NASDAQ-100 ticker list...")
+            # Try to get from Wikipedia first
+            url = "https://en.wikipedia.org/wiki/NASDAQ-100"
+            tables = pd.read_html(url)
+            
+            # Find the table with company information
+            nasdaq_100_table = None
+            for table in tables:
+                if 'Ticker' in table.columns or 'Symbol' in table.columns:
+                    nasdaq_100_table = table
+                    break
+            
+            if nasdaq_100_table is not None:
+                # Try different possible column names
+                ticker_column = None
+                for col in ['Ticker', 'Symbol', 'ticker', 'symbol']:
+                    if col in nasdaq_100_table.columns:
+                        ticker_column = col
+                        break
+                
+                if ticker_column:
+                    tickers = nasdaq_100_table[ticker_column].tolist()
+                    # Clean ticker symbols
+                    tickers = [str(ticker).strip().upper() for ticker in tickers if str(ticker).strip()]
+                    # Remove any invalid entries
+                    tickers = [ticker for ticker in tickers if ticker != 'NAN' and len(ticker) <= 5]
+                    
+                    logger.info(f"Found {len(tickers)} NASDAQ-100 tickers")
+                    return tickers
+            
+            # Fallback: Use a manually curated list of major NASDAQ-100 stocks
+            logger.warning("Could not fetch from Wikipedia, using fallback list")
+            fallback_tickers = [
+                'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'GOOG', 'AMZN', 'META', 'TSLA', 'AVGO', 'COST',
+                'NFLX', 'TMUS', 'CSCO', 'AMD', 'PEP', 'LIN', 'INTU', 'QCOM', 'CMCSA', 'HON',
+                'TXN', 'AMGN', 'AMAT', 'PANW', 'ADP', 'VRTX', 'SBUX', 'GILD', 'MU', 'INTC',
+                'ADI', 'LRCX', 'KLAC', 'REGN', 'SNPS', 'CDNS', 'ORLY', 'CTAS', 'NXPI', 'ABNB',
+                'FTNT', 'MRVL', 'TEAM', 'ADSK', 'WDAY', 'CHTR', 'TTWO', 'FAST', 'BIIB', 'KDP',
+                'CRWD', 'MNST', 'ROST', 'ODFL', 'VRSK', 'EXC', 'FANG', 'DDOG', 'XEL', 'AEP',
+                'BKR', 'CTSH', 'LULU', 'GEHC', 'EA', 'IDXX', 'KHC', 'CSGP', 'ON', 'ANSS',
+                'ZS', 'DLTR', 'CCEP', 'MRNA', 'ILMN', 'SIRI', 'WBD', 'BKNG', 'ISRG', 'PCAR',
+                'PAYX', 'DXCM', 'CDW', 'SMCI', 'GFS', 'MELI', 'LCID', 'RIVN', 'ZM', 'DOCU',
+                'ENPH', 'SGEN', 'WBA', 'ALGN', 'JD', 'PDD', 'BIDU', 'NTES', 'TCOM', 'ZTO'
+            ]
+            
+            logger.info(f"Using fallback list with {len(fallback_tickers)} NASDAQ-100 tickers")
+            return fallback_tickers
+            
+        except Exception as e:
+            logger.error(f"Error fetching NASDAQ-100 tickers: {e}")
+            raise e
     
     def download_stock_data(self, ticker: str, period: str = "max") -> Optional[pd.DataFrame]:
         """
